@@ -170,6 +170,8 @@ public class NoteEditActivity extends Activity implements OnClickListener,
     private MediaPlayer mPlayer;;
     private String mCurrentAudioPath; // 当前正在录制的文件路径
 
+    // 用于记录当前正在播放的那个按钮，以便我们需要重置它的状态
+    private android.widget.Button mCurrentPlayBtn;
     // 在 NoteEditActivity 中添加此方法
     private long getAudioDuration(String path) {
         android.media.MediaPlayer mp = new android.media.MediaPlayer();
@@ -375,7 +377,8 @@ public class NoteEditActivity extends Activity implements OnClickListener,
                 @Override
                 public void onClick(View v) {
                     // 如果要切换图标，可以使用 btnPlay.setText("⏸")
-                    playAudio(audioPath, null); // 暂时传 null，不需要切换 ImageView 图标
+                    // [修复] 传入 btnPlay 对象，而不是 null
+                    playAudio(audioPath, btnPlay);
                 }
             });
 
@@ -400,33 +403,61 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         android.util.Log.e(TAG, "addAudioViewRow: 创建 UI 时发生错误", e);
     }
     }
-    private void playAudio(String path, final ImageView btnPlay) {
+    private void playAudio(String path, final android.widget.Button btnPlay) {
+        // 1. 检查当前是否有正在播放的音频
         if (mPlayer != null) {
-            mPlayer.release();
-            mPlayer = null;
+            // 情况 A：点击的是当前正在播放的按钮 -> 执行“暂停/停止”逻辑
+            if (mCurrentPlayBtn == btnPlay) {
+                mPlayer.stop();
+                mPlayer.release();
+                mPlayer = null;
+
+                // 恢复图标为“播放”
+                btnPlay.setText("▶");
+                mCurrentPlayBtn = null;
+                return; // *** 关键：直接返回，不再执行后面的开始播放逻辑 ***
+            }
+
+            // 情况 B：点击的是另一个音频的按钮 -> 先停止旧的，再播新的
+            else {
+                mPlayer.stop();
+                mPlayer.release();
+                mPlayer = null;
+
+                // 把上一个按钮的图标复原
+                if (mCurrentPlayBtn != null) {
+                    mCurrentPlayBtn.setText("▶");
+                }
+            }
         }
 
+        // 2. 开始播放新的音频
         mPlayer = new MediaPlayer();
         try {
             mPlayer.setDataSource(path);
             mPlayer.prepare();
             mPlayer.start();
 
-            // [交互] 切换为暂停图标 (此处简化演示，实际应处理暂停逻辑)
-            btnPlay.setImageResource(android.R.drawable.ic_media_pause);
+            // 更新当前按钮状态为“暂停”
+            btnPlay.setText("⏸");
+            // 记录当前正在播放的按钮
+            mCurrentPlayBtn = btnPlay;
 
+            // 3. 监听播放结束
             mPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
                 @Override
                 public void onCompletion(MediaPlayer mp) {
-                    // 播放结束，恢复图标
-                    btnPlay.setImageResource(android.R.drawable.ic_media_play);
                     mPlayer.release();
                     mPlayer = null;
+
+                    // 恢复图标
+                    btnPlay.setText("▶");
+                    mCurrentPlayBtn = null;
                 }
             });
 
         } catch (IOException e) {
-            Log.e(TAG, "Play audio failed");
+            android.util.Log.e(TAG, "Play audio failed", e);
         }
     }
     // 重写 Activity 的 onRequestPermissionsResult 方法
