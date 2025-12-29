@@ -140,4 +140,17 @@
     </plurals>
     <string name="char_count">Count:%d</string>
 
+    <string name="menu_ai_summary">AI 智能总结</string>
+    <string name="ai_summary_dialog_title">星火 Lite 智能总结</string>
+    <string name="ai_summary_loading">正在连接星火 Lite 模型...</string>
+    <string name="ai_summary_error">连接失败，请检查网络</string>
+    <string name="ai_summary_empty">便签内容为空，无法总结</string>
+    <string name="btn_copy">复制</string>
+    <string name="btn_append">追加到正文</string>
+    <string name="btn_close">关闭</string>
+    <string name="ai_copy_success">已复制到剪贴板</string>
+
+    <string name="menu_mode_view">进入阅读模式</string>
+    <string name="menu_mode_edit">进入编辑模式</string>
+    <string name="info_read_only_mode">已进入阅读模式，再次点击菜单可解锁</string>
 </resources>

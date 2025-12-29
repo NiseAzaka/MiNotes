@@ -32,3 +32,7 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+#lib
+
+httpcomponents-client-4.5.14-bin/

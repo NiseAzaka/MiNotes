@@ -79,10 +79,45 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+// [新增] AI 功能所需的导入
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
+// 注意：使用 Android 自带的 Base64
+import android.util.Base64;
 
 
 public class NoteEditActivity extends Activity implements OnClickListener,
         NoteSettingChangedListener, OnTextViewChangeListener {
+    // [新增] 只读模式相关变量
+    private boolean mIsReadMode = false;
+    private static final String PREF_READ_MODE_PREFIX = "read_mode_";
+    // ================== 讯飞星火 Lite (X1.5) 配置 ==================
+    private static final String SPARK_APP_ID = "cd96030c";
+    private static final String SPARK_API_SECRET = "N2QwOGI5NmExMGI3ZTNkYWY2NjI5OGIy";
+    private static final String SPARK_API_KEY = "c7ac2b87174d615326d9df93f06e137c";
+
+    // Spark Lite 接口地址
+    private static final String SPARK_HOST_URL = "https://spark-api.xf-yun.com/v1/x1";
+
+    // [修改这里] 把 "general" 改为 "x1"
+    private static final String SPARK_DOMAIN = "x1";
+
+    private StringBuilder mAiResponseBuilder;
+    private android.app.ProgressDialog mAiProgressDialog;
+    // ===============================================================
     private class HeadViewHolder {
         public TextView tvModified;
 
@@ -103,7 +138,50 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         sBgSelectorBtnsMap.put(R.id.iv_bg_green, ResourceParser.GREEN);
         sBgSelectorBtnsMap.put(R.id.iv_bg_white, ResourceParser.WHITE);
     }
+    // [新增] 切换阅读/编辑模式的核心逻辑
+    private void setReadMode(boolean isReadMode) {
+        mIsReadMode = isReadMode;
 
+        // 1. 控制输入框是否可编辑
+        if (mIsReadMode) {
+            // 阅读模式：不可获取焦点，但可以滚动和复制
+            mNoteEditor.setFocusable(false);
+            mNoteEditor.setFocusableInTouchMode(false);
+            // 隐藏光标
+            mNoteEditor.setCursorVisible(false);
+            // 强制关闭软键盘
+            android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.hideSoftInputFromWindow(mNoteEditor.getWindowToken(), 0);
+            }
+        } else {
+            // 编辑模式：恢复焦点
+            mNoteEditor.setFocusable(true);
+            mNoteEditor.setFocusableInTouchMode(true);
+            mNoteEditor.setCursorVisible(true);
+            // 恢复点击事件
+            mNoteEditor.requestFocus();
+        }
+
+        // 2. 控制底部工具栏的显示/隐藏 (阅读模式下隐藏无关按钮，界面更清爽)
+        // 获取底部那个包含修改时间的布局容器（原代码中没有直接ID，通过 mHeadViewPanel 的父布局或者直接操作子控件）
+        // 这里我们可以简单地禁用或隐藏字体选择器和背景选择器
+        if (mIsReadMode) {
+            // 确保选择器面板关闭
+            mNoteBgColorSelector.setVisibility(View.GONE);
+            mFontSizeSelector.setVisibility(View.GONE);
+        }
+
+        // 3. 刷新菜单（这一步会触发 onPrepareOptionsMenu 更新菜单文字）
+        invalidateOptionsMenu();
+
+        // 4. 持久化保存状态 (Key = read_mode_ + NoteID)
+        if (mWorkingNote != null && mWorkingNote.getNoteId() > 0) {
+            mSharedPrefs.edit()
+                    .putBoolean(PREF_READ_MODE_PREFIX + mWorkingNote.getNoteId(), mIsReadMode)
+                    .apply(); // 使用 apply 异步提交
+        }
+    }
     private static final Map<Integer, Integer> sBgSelectorSelectionMap = new HashMap<Integer, Integer>();
     static {
         sBgSelectorSelectionMap.put(ResourceParser.YELLOW, R.id.iv_bg_yellow_select);
@@ -596,6 +674,12 @@ public class NoteEditActivity extends Activity implements OnClickListener,
     private void initNoteScreen() {
         mNoteEditor.setTextAppearance(this, TextAppearanceResources
                 .getTexAppearanceResource(mFontSizeId));
+        // [新增] 初始化阅读模式状态
+        // 只有当便签已存在（不是新建）时才读取状态
+        if (mWorkingNote.getNoteId() > 0) {
+            boolean savedMode = mSharedPrefs.getBoolean(PREF_READ_MODE_PREFIX + mWorkingNote.getNoteId(), false);
+            setReadMode(savedMode);
+        }
         if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
             switchToListMode(mWorkingNote.getContent());
         } else {
@@ -691,6 +775,16 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         mNoteHeaderHolder.ibSetBgColor = (ImageView) findViewById(R.id.btn_set_bg_color);
         mNoteHeaderHolder.ibSetBgColor.setOnClickListener(this);
         mNoteEditor = (EditText) findViewById(R.id.note_edit_view);
+        // [新增] 点击事件拦截：如果处于阅读模式，拦截点击，防止弹出键盘
+        mNoteEditor.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mIsReadMode) {
+                    // 阅读模式下被点击，可以提示用户如何解锁
+                    // showToast(R.string.info_read_only_mode);
+                }
+            }
+        });
         mNoteEditorPanel = findViewById(R.id.sv_note_edit);
         mNoteBgColorSelector = findViewById(R.id.note_bg_color_selector);
 
@@ -766,6 +860,237 @@ public class NoteEditActivity extends Activity implements OnClickListener,
 
         sendBroadcast(intent);
         setResult(RESULT_OK, intent);
+    }
+    // [新增] 执行星火 AI 总结入口
+    // [修改后] 执行星火 AI 总结入口
+    private void performSparkLiteSummary() {
+        // 1. 先调用此方法同步 View 中的内容到 mWorkingNote 对象中
+        // 注意：这里不需要接收返回值，因为我们只需要它执行同步逻辑
+        getWorkingText();
+
+        // 2. 从 mWorkingNote 对象中获取真正的文本内容
+        String content = mWorkingNote.getContent();
+
+        // 3. 简单过滤掉 CheckList 的标记符号，避免干扰 AI
+        content = content.replace(TAG_CHECKED, "").replace(TAG_UNCHECKED, "");
+
+        if (TextUtils.isEmpty(content.trim())) {
+            showToast(R.string.ai_summary_empty);
+            return;
+        }
+
+        mAiResponseBuilder = new StringBuilder();
+
+        // 显示加载框
+        mAiProgressDialog = new android.app.ProgressDialog(this);
+        mAiProgressDialog.setTitle(getString(R.string.ai_summary_dialog_title));
+        mAiProgressDialog.setMessage(getString(R.string.ai_summary_loading));
+        mAiProgressDialog.setCancelable(true);
+        mAiProgressDialog.show();
+
+        final String finalContent = content;
+        // 在子线程启动 WebSocket
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                startSparkWebSocket(finalContent);
+            }
+        }).start();
+    }
+
+    // [新增] 启动 WebSocket 连接
+    private void startSparkWebSocket(final String userContent) {
+        try {
+            // 1. 生成鉴权 URL
+            String authUrl = getAuthUrl(SPARK_HOST_URL, SPARK_API_KEY, SPARK_API_SECRET);
+            // 将 https 替换为 wss
+            String wsUrl = authUrl.replace("http://", "ws://").replace("https://", "wss://");
+
+            OkHttpClient client = new OkHttpClient.Builder().build();
+            Request request = new Request.Builder().url(wsUrl).build();
+
+            // 2. 建立连接
+            client.newWebSocket(request, new WebSocketListener() {
+                @Override
+                public void onOpen(WebSocket webSocket, Response response) {
+                    super.onOpen(webSocket, response);
+                    // 连接成功，发送数据
+                    sendUserMessage(webSocket, userContent);
+                }
+
+                @Override
+                public void onMessage(WebSocket webSocket, String text) {
+                    super.onMessage(webSocket, text);
+                    // 收到消息，解析
+                    parseSparkResponse(text);
+                }
+
+                @Override
+                public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                    super.onFailure(webSocket, t, response);
+                    handleAiError(t);
+                }
+            });
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 构造并发送用户消息 JSON
+    private void sendUserMessage(WebSocket webSocket, String content) {
+        try {
+            JSONObject requestJson = new JSONObject();
+
+            // Header
+            JSONObject header = new JSONObject();
+            header.put("app_id", SPARK_APP_ID);
+            header.put("uid", java.util.UUID.randomUUID().toString().substring(0, 10));
+            requestJson.put("header", header);
+
+            // Parameter
+            JSONObject parameter = new JSONObject();
+            JSONObject chat = new JSONObject();
+            chat.put("domain", SPARK_DOMAIN);
+            chat.put("temperature", 0.5);
+            chat.put("max_tokens", 2048);
+            parameter.put("chat", chat);
+            requestJson.put("parameter", parameter);
+
+            // Payload
+            JSONObject payload = new JSONObject();
+            JSONObject message = new JSONObject();
+            JSONArray textArray = new JSONArray();
+            JSONObject textObj = new JSONObject();
+            textObj.put("role", "user");
+            // 提示词：强制要求总结
+            textObj.put("content", "请简要总结以下便签内容的核心要点：\n\n" + content);
+            textArray.put(textObj);
+            message.put("text", textArray);
+            payload.put("message", message);
+            requestJson.put("payload", payload);
+
+            webSocket.send(requestJson.toString());
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 解析星火返回的 JSON
+    private void parseSparkResponse(String jsonText) {
+        try {
+            JSONObject jsonObject = new JSONObject(jsonText);
+            JSONObject header = jsonObject.optJSONObject("header");
+            int code = header.optInt("code");
+
+            if (code != 0) {
+                Log.e(TAG, "Spark Error: " + jsonText);
+                handleAiError(new Exception("Error Code: " + code));
+                return;
+            }
+
+            JSONObject payload = jsonObject.optJSONObject("payload");
+            JSONObject choices = payload.optJSONObject("choices");
+            int status = header.optInt("status"); // 0:首包, 1:中间, 2:尾包
+            JSONArray textArray = choices.optJSONArray("text");
+
+            if (textArray != null && textArray.length() > 0) {
+                JSONObject contentObj = textArray.getJSONObject(0);
+                String content = contentObj.optString("content");
+                mAiResponseBuilder.append(content);
+            }
+
+            if (status == 2) {
+                // 传输结束，显示结果
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mAiProgressDialog != null) mAiProgressDialog.dismiss();
+                        showAiResultDialog(mAiResponseBuilder.toString());
+                    }
+                });
+            }
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 统一错误处理
+    private void handleAiError(Throwable t) {
+        t.printStackTrace();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mAiProgressDialog != null) mAiProgressDialog.dismiss();
+                showToast(R.string.ai_summary_error);
+            }
+        });
+    }
+
+    // [新增] 显示结果对话框
+    private void showAiResultDialog(final String result) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(R.string.ai_summary_dialog_title);
+        builder.setMessage(result);
+
+        // 复制按钮
+        builder.setNeutralButton(R.string.btn_copy, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                android.content.ClipData clip = android.content.ClipData.newPlainText("AI Summary", result);
+                cm.setPrimaryClip(clip);
+                showToast(R.string.ai_copy_success);
+            }
+        });
+
+        // 追加按钮
+        builder.setPositiveButton(R.string.btn_append, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                if (mNoteEditor != null) {
+                    mNoteEditor.append("\n\n【AI 总结】\n" + result);
+                    saveNote();
+                    // 如果有光标，移动到末尾
+                    mNoteEditor.setSelection(mNoteEditor.length());
+                }
+            }
+        });
+
+        builder.setNegativeButton(R.string.btn_close, null);
+        builder.show();
+    }
+
+    // [新增] 星火鉴权 URL 生成算法 (HMAC-SHA256)
+    public static String getAuthUrl(String hostUrl, String apiKey, String apiSecret) throws Exception {
+        URL url = new URL(hostUrl);
+        SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+        String date = sdf.format(new Date());
+
+        String host = url.getHost();
+        // 注意：v1/x1 这种带路径的 URL，Request-Line 必须包含路径
+        StringBuilder builder = new StringBuilder("host: ").append(host).append("\n").//
+                append("date: ").append(date).append("\n").//
+                append("GET ").append(url.getPath()).append(" HTTP/1.1");
+
+        Mac mac = Mac.getInstance("hmacsha256");
+        SecretKeySpec spec = new SecretKeySpec(apiSecret.getBytes(StandardCharsets.UTF_8), "hmacsha256");
+        mac.init(spec);
+        byte[] hexDigits = mac.doFinal(builder.toString().getBytes(StandardCharsets.UTF_8));
+
+        // 使用 Android Base64 NoWrap 模式
+        String sha = Base64.encodeToString(hexDigits, Base64.NO_WRAP);
+
+        String authorization = String.format("api_key=\"%s\", algorithm=\"%s\", headers=\"%s\", signature=\"%s\"", apiKey, "hmac-sha256", "host date request-line", sha);
+
+        String authBase64 = Base64.encodeToString(authorization.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+
+        return String.format("%s?authorization=%s&date=%s&host=%s", hostUrl,
+                java.net.URLEncoder.encode(authBase64, "UTF-8"),
+                java.net.URLEncoder.encode(date, "UTF-8"), host);
     }
 
     public void onClick(View v) {
@@ -851,6 +1176,21 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         } else {
             getMenuInflater().inflate(R.menu.note_edit, menu);
         }
+
+        // [关键修复部分] 设置菜单标题
+        MenuItem modeItem = menu.findItem(R.id.menu_toggle_read_mode);
+        if (modeItem != null) {
+            if (mIsReadMode) {
+                // 情况 A：当前【是】阅读模式 -> 按钮功能应该是【退出阅读/进入编辑】
+                modeItem.setTitle(R.string.menu_mode_edit);
+                modeItem.setIcon(android.R.drawable.ic_menu_edit);
+            } else {
+                // 情况 B：当前【是】编辑模式 -> 按钮功能应该是【进入阅读】
+                modeItem.setTitle(R.string.menu_mode_view);
+                modeItem.setIcon(android.R.drawable.ic_menu_view);
+            }
+        }
+
         if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
             menu.findItem(R.id.menu_list_mode).setTitle(R.string.menu_normal_mode);
         } else {
@@ -878,6 +1218,17 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         switch (item.getItemId()) {
             case R.id.menu_new_note:
                 createNewNote();
+                break;
+            // [新增] 处理 AI 总结菜单点击
+            case R.id.menu_ai_summary:
+                performSparkLiteSummary();
+                break;
+            // [新增] 处理阅读/编辑模式切换
+            case R.id.menu_toggle_read_mode:
+                setReadMode(!mIsReadMode); // 切换状态
+                if (mIsReadMode) {
+                    showToast(R.string.info_read_only_mode);
+                }
                 break;
             case R.id.menu_delete:
                 AlertDialog.Builder builder = new AlertDialog.Builder(this);
