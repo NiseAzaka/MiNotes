@@ -1,0 +1,2 @@
+# 强制 Git 在检入（commit）时将所有文本文件转换为 LF
+* text=auto eol=lf
