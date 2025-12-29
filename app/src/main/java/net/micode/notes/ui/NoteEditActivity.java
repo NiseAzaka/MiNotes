@@ -1,0 +1,1611 @@
+/*
+ * Copyright (c) 2010-2011, The MiCode Open Source Community (www.micode.net)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package net.micode.notes.ui;
+
+import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.AlertDialog;
+import android.app.PendingIntent;
+import android.app.SearchManager;
+import android.appwidget.AppWidgetManager;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Paint;
+import android.media.MediaPlayer;
+import android.media.MediaRecorder;
+import android.os.Bundle;
+import android.preference.PreferenceManager;
+import android.text.Editable;
+import android.text.Spannable;
+import android.text.SpannableString;
+import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.format.DateUtils;
+import android.text.style.BackgroundColorSpan;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.view.WindowManager;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.CompoundButton.OnCheckedChangeListener;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import net.micode.notes.R;
+import net.micode.notes.data.Notes;
+import net.micode.notes.data.Notes.NoteColumns;
+import net.micode.notes.data.Notes.TextNote;
+import net.micode.notes.model.WorkingNote;
+import net.micode.notes.model.WorkingNote.NoteSettingChangedListener;
+import net.micode.notes.tool.DataUtils;
+import net.micode.notes.tool.ResourceParser;
+import net.micode.notes.tool.ResourceParser.TextAppearanceResources;
+import net.micode.notes.ui.DateTimePickerDialog.OnDateTimeSetListener;
+import net.micode.notes.ui.NoteEditText.OnTextViewChangeListener;
+import net.micode.notes.widget.NoteWidgetProvider_2x;
+import net.micode.notes.widget.NoteWidgetProvider_4x;
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+// [新增] AI 功能所需的导入
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
+// 注意：使用 Android 自带的 Base64
+import android.util.Base64;
+
+
+public class NoteEditActivity extends Activity implements OnClickListener,
+        NoteSettingChangedListener, OnTextViewChangeListener {
+    // [新增] 只读模式相关变量
+    private boolean mIsReadMode = false;
+    private static final String PREF_READ_MODE_PREFIX = "read_mode_";
+    // ================== 讯飞星火 Lite (X1.5) 配置 ==================
+    private static final String SPARK_APP_ID = "cd96030c";
+    private static final String SPARK_API_SECRET = "N2QwOGI5NmExMGI3ZTNkYWY2NjI5OGIy";
+    private static final String SPARK_API_KEY = "c7ac2b87174d615326d9df93f06e137c";
+
+    // Spark Lite 接口地址
+    private static final String SPARK_HOST_URL = "https://spark-api.xf-yun.com/v1/x1";
+
+    // [修改这里] 把 "general" 改为 "x1"
+    private static final String SPARK_DOMAIN = "x1";
+
+    private StringBuilder mAiResponseBuilder;
+    private android.app.ProgressDialog mAiProgressDialog;
+    // ===============================================================
+    private class HeadViewHolder {
+        public TextView tvModified;
+
+        public TextView tvCharCount;
+
+        public ImageView ivAlertIcon;
+
+        public TextView tvAlertDate;
+
+        public ImageView ibSetBgColor;
+    }
+
+    private static final Map<Integer, Integer> sBgSelectorBtnsMap = new HashMap<Integer, Integer>();
+    static {
+        sBgSelectorBtnsMap.put(R.id.iv_bg_yellow, ResourceParser.YELLOW);
+        sBgSelectorBtnsMap.put(R.id.iv_bg_red, ResourceParser.RED);
+        sBgSelectorBtnsMap.put(R.id.iv_bg_blue, ResourceParser.BLUE);
+        sBgSelectorBtnsMap.put(R.id.iv_bg_green, ResourceParser.GREEN);
+        sBgSelectorBtnsMap.put(R.id.iv_bg_white, ResourceParser.WHITE);
+    }
+    // [新增] 切换阅读/编辑模式的核心逻辑
+    private void setReadMode(boolean isReadMode) {
+        mIsReadMode = isReadMode;
+
+        // 1. 控制输入框是否可编辑
+        if (mIsReadMode) {
+            // 阅读模式：不可获取焦点，但可以滚动和复制
+            mNoteEditor.setFocusable(false);
+            mNoteEditor.setFocusableInTouchMode(false);
+            // 隐藏光标
+            mNoteEditor.setCursorVisible(false);
+            // 强制关闭软键盘
+            android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.hideSoftInputFromWindow(mNoteEditor.getWindowToken(), 0);
+            }
+        } else {
+            // 编辑模式：恢复焦点
+            mNoteEditor.setFocusable(true);
+            mNoteEditor.setFocusableInTouchMode(true);
+            mNoteEditor.setCursorVisible(true);
+            // 恢复点击事件
+            mNoteEditor.requestFocus();
+        }
+
+        // 2. 控制底部工具栏的显示/隐藏 (阅读模式下隐藏无关按钮，界面更清爽)
+        // 获取底部那个包含修改时间的布局容器（原代码中没有直接ID，通过 mHeadViewPanel 的父布局或者直接操作子控件）
+        // 这里我们可以简单地禁用或隐藏字体选择器和背景选择器
+        if (mIsReadMode) {
+            // 确保选择器面板关闭
+            mNoteBgColorSelector.setVisibility(View.GONE);
+            mFontSizeSelector.setVisibility(View.GONE);
+        }
+
+        // 3. 刷新菜单（这一步会触发 onPrepareOptionsMenu 更新菜单文字）
+        invalidateOptionsMenu();
+
+        // 4. 持久化保存状态 (Key = read_mode_ + NoteID)
+        if (mWorkingNote != null && mWorkingNote.getNoteId() > 0) {
+            mSharedPrefs.edit()
+                    .putBoolean(PREF_READ_MODE_PREFIX + mWorkingNote.getNoteId(), mIsReadMode)
+                    .apply(); // 使用 apply 异步提交
+        }
+    }
+    private static final Map<Integer, Integer> sBgSelectorSelectionMap = new HashMap<Integer, Integer>();
+    static {
+        sBgSelectorSelectionMap.put(ResourceParser.YELLOW, R.id.iv_bg_yellow_select);
+        sBgSelectorSelectionMap.put(ResourceParser.RED, R.id.iv_bg_red_select);
+        sBgSelectorSelectionMap.put(ResourceParser.BLUE, R.id.iv_bg_blue_select);
+        sBgSelectorSelectionMap.put(ResourceParser.GREEN, R.id.iv_bg_green_select);
+        sBgSelectorSelectionMap.put(ResourceParser.WHITE, R.id.iv_bg_white_select);
+    }
+
+    private static final Map<Integer, Integer> sFontSizeBtnsMap = new HashMap<Integer, Integer>();
+    static {
+        sFontSizeBtnsMap.put(R.id.ll_font_large, ResourceParser.TEXT_LARGE);
+        sFontSizeBtnsMap.put(R.id.ll_font_small, ResourceParser.TEXT_SMALL);
+        sFontSizeBtnsMap.put(R.id.ll_font_normal, ResourceParser.TEXT_MEDIUM);
+        sFontSizeBtnsMap.put(R.id.ll_font_super, ResourceParser.TEXT_SUPER);
+    }
+
+    private static final Map<Integer, Integer> sFontSelectorSelectionMap = new HashMap<Integer, Integer>();
+    static {
+        sFontSelectorSelectionMap.put(ResourceParser.TEXT_LARGE, R.id.iv_large_select);
+        sFontSelectorSelectionMap.put(ResourceParser.TEXT_SMALL, R.id.iv_small_select);
+        sFontSelectorSelectionMap.put(ResourceParser.TEXT_MEDIUM, R.id.iv_medium_select);
+        sFontSelectorSelectionMap.put(ResourceParser.TEXT_SUPER, R.id.iv_super_select);
+    }
+
+    private static final String TAG = "NoteEditActivity";
+
+    private HeadViewHolder mNoteHeaderHolder;
+
+    private View mHeadViewPanel;
+
+    private View mNoteBgColorSelector;
+
+    private View mFontSizeSelector;
+
+    private EditText mNoteEditor;
+
+    private View mNoteEditorPanel;
+
+    private WorkingNote mWorkingNote;
+
+    private SharedPreferences mSharedPrefs;
+    private int mFontSizeId;
+
+    private static final String PREFERENCE_FONT_SIZE = "pref_font_size";
+
+    private static final int SHORTCUT_ICON_TITLE_MAX_LEN = 10;
+
+    public static final String TAG_CHECKED = String.valueOf('\u221A');
+    public static final String TAG_UNCHECKED = String.valueOf('\u25A1');
+
+    private LinearLayout mEditTextList;
+
+    private String mUserQuery;
+    private Pattern mPattern;
+
+    private static final int REQUEST_CODE_RECORD_AUDIO = 101;
+    private MediaRecorder mRecorder;
+    private boolean mIsRecording = false;
+    private String mRecordFileName; // 临时存储路径
+    // [新增] 成员变量
+    private ImageView mBtnMic;
+    private LinearLayout mAudioListContainer;
+    private MediaPlayer mPlayer;;
+    private String mCurrentAudioPath; // 当前正在录制的文件路径
+
+    // 用于记录当前正在播放的那个按钮，以便我们需要重置它的状态
+    private android.widget.Button mCurrentPlayBtn;
+    // 在 NoteEditActivity 中添加此方法
+    private long getAudioDuration(String path) {
+        android.media.MediaPlayer mp = new android.media.MediaPlayer();
+        try {
+            mp.setDataSource(path);
+            mp.prepare();
+            return mp.getDuration(); // 返回时长（毫秒）
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Get audio duration failed", e);
+            return 0;
+        } finally {
+            mp.release();
+        }
+    }
+    // [新增] 停止录音
+    private void startRecording() {
+        // 1. 准备文件路径 (建议存放在 getExternalFilesDir 或 getCacheDir)
+        mCurrentAudioPath = getExternalFilesDir(null).getAbsolutePath() + "/" + System.currentTimeMillis() + ".amr";
+
+        mRecorder = new MediaRecorder();
+        try {
+            mRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            mRecorder.setOutputFormat(MediaRecorder.OutputFormat.AMR_NB);
+            mRecorder.setOutputFile(mCurrentAudioPath);
+            mRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB);
+
+            mRecorder.prepare();
+            mRecorder.start();
+
+            mIsRecording = true;
+
+            // [交互] 改变按钮状态，提示正在录音 (例如换成红色图标)
+            mBtnMic.setImageResource(android.R.drawable.ic_media_pause);
+            showToast(R.string.info_recording_start); // 需在 strings.xml 定义
+
+        } catch (IOException e) {
+            Log.e(TAG, "Recording failed");
+            mIsRecording = false;
+        }
+    }
+
+    // 修改 NoteEditActivity.java
+
+    private void stopRecording() {
+        if (mRecorder != null) {
+            try {
+                mRecorder.stop();
+                Log.d(TAG, "MediaRecorder stopped successfully");
+            } catch (Exception e) {
+                // 捕获所有异常，防止录音时间过短导致崩溃
+                Log.e(TAG, "MediaRecorder stop failed: " + e.getMessage());
+                // 如果停止失败，可能文件未生成，需做清理
+                mRecorder.release();
+                mRecorder = null;
+                mIsRecording = false;
+                mBtnMic.setImageResource(android.R.drawable.ic_btn_speak_now);
+                return;
+            }
+
+            mRecorder.release();
+            mRecorder = null;
+            mIsRecording = false;
+
+            // 恢复图标
+            mBtnMic.setImageResource(android.R.drawable.ic_btn_speak_now);
+
+            // 获取时长（如果文件不存在或损坏，这里返回 0）
+            long duration = getAudioDuration(mCurrentAudioPath);
+            Log.d(TAG, "Audio recorded: " + mCurrentAudioPath + ", duration: " + duration);
+
+            if (duration > 0) {
+                // 1. 保存数据 (确保 WorkingNote 已按第一步修改)
+                mWorkingNote.convertToAudioNote(mCurrentAudioPath, duration);
+
+                // 2. 触发保存到数据库
+                saveNote();
+
+                // 3. [关键] 直接在界面添加视图
+                // 确保调用的是您定义的那个方法 (addAudioView 或 addAudioViewRow)
+                addAudioViewRow(mCurrentAudioPath);
+            } else {
+                Toast.makeText(this, "录音时间太短或失败", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+
+    private void refreshAudioList() {
+
+        android.util.Log.d(TAG, "refreshAudioList: 准备刷新音频列表");
+        // 1. 清空现有的视图，防止重复添加
+        mAudioListContainer.removeAllViews();
+
+        // 2. 获取 WorkingNote 中的音频数据
+        java.util.List<String> paths = mWorkingNote.getAudioPaths();
+
+        // [Log] 2. 打印获取到的数据情况
+        if (paths == null) {
+            android.util.Log.w(TAG, "refreshAudioList: getAudioPaths() 返回 null");
+        } else {
+            android.util.Log.d(TAG, "refreshAudioList: 获取到音频数量: " + paths.size());
+            if (paths.size() > 0) {
+                android.util.Log.d(TAG, "refreshAudioList: 列表内容: " + paths.toString());
+            }
+        }
+
+        // 3. 遍历并在界面上创建视图
+        if (paths != null && paths.size() > 0) {
+            mAudioListContainer.setVisibility(View.VISIBLE);
+            // [Log] 3. 开始循环创建视图
+
+            for (String path : paths) {
+                // 复用之前的 addAudioView 方法，但需要稍微改造一下该方法
+                // 让它只负责添加 UI，不负责重复保存数据
+                android.util.Log.d(TAG, "refreshAudioList: 正在添加路径 -> " + path);
+                addAudioViewRow(path);
+
+            }
+        } else {
+            mAudioListContainer.setVisibility(View.GONE);
+            android.util.Log.d(TAG, "refreshAudioList: 没有音频数据，隐藏容器");
+        }
+    }
+
+    // 这是一个纯 UI 添加方法，不涉及保存逻辑
+    private void addAudioViewRow(final String audioPath) {
+        // [Log] 1. 开始构建 UI 条目
+        android.util.Log.d(TAG, "addAudioViewRow: 开始构建 UI, 路径=" + audioPath);
+
+        try {
+            // 1. 创建父布局
+            final LinearLayout audioItem = new LinearLayout(this);
+            audioItem.setOrientation(LinearLayout.HORIZONTAL);
+            // [调试色] 设置一个明显的背景色（浅灰色边框效果），确位置
+            audioItem.setBackgroundColor(0xFFE0E0E0);
+            // 设置内边距
+            audioItem.setPadding(30, 20, 30, 20);
+            // 设置外边距（让条目之间有间隔）
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            itemParams.setMargins(0, 10, 0, 10);
+            audioItem.setLayoutParams(itemParams);
+
+
+            // [Log] 2. 创建子 View
+            android.util.Log.d(TAG, "addAudioViewRow: 创建播放按钮和文本");
+
+
+            // 2. 创建播放按钮 (使用 Button 而不是 ImageView，防止图标看不见)
+            final android.widget.Button btnPlay = new android.widget.Button(this);
+            btnPlay.setText("▶"); // 使用文字符号代替图标
+            btnPlay.setTextSize(18);
+            btnPlay.setTextColor(android.graphics.Color.BLACK);
+            // 移除默认按钮背景，设为透明或简单颜色
+            btnPlay.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            audioItem.addView(btnPlay, btnParams);
+
+
+
+            String fileName = null;
+
+
+
+            // 3. 创建文件名文本
+            TextView tvInfo = new TextView(this);
+            fileName = new java.io.File(audioPath).getName();
+            // [Log] 3. 打印文件名确认
+            android.util.Log.d(TAG, "addAudioViewRow: 显示文件名: " + fileName);
+            tvInfo.setText(" 语音: " + fileName);
+            tvInfo.setTextSize(16);
+            // [关键] 强制设为黑色，防止变白
+            tvInfo.setTextColor(android.graphics.Color.BLACK);
+            tvInfo.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+            // 让文本占据剩余空间
+            LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+            textParams.setMargins(20, 0, 0, 0); // 左边距
+            audioItem.addView(tvInfo, textParams);
+
+            // 4. 创建删除按钮 (使用 Button)
+            android.widget.Button btnDelete = new android.widget.Button(this);
+            btnDelete.setText("✕"); // 叉号符号
+            btnDelete.setTextSize(18);
+            btnDelete.setTextColor(android.graphics.Color.RED);
+            btnDelete.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            audioItem.addView(btnDelete);
+
+            // 5. 添加到容器
+            mAudioListContainer.addView(audioItem);
+            mAudioListContainer.setVisibility(View.VISIBLE);
+
+            // [Log] 4. 构建完成，打印容器当前子 View 数量
+            android.util.Log.d(TAG, "addAudioViewRow: UI 添加成功! 当前容器子 View 数量: " + mAudioListContainer.getChildCount());
+            android.util.Log.d(TAG, "addAudioViewRow: 容器可见性: " + (mAudioListContainer.getVisibility() == View.VISIBLE ? "VISIBLE" : "GONE/INVISIBLE"));
+
+            // --- 点击事件 ---
+            btnPlay.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    // 如果要切换图标，可以使用 btnPlay.setText("⏸")
+                    // [修复] 传入 btnPlay 对象，而不是 null
+                    playAudio(audioPath, btnPlay);
+                }
+            });
+
+            btnDelete.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (mPlayer != null && mPlayer.isPlaying()) {
+                        mPlayer.stop();
+                        mPlayer.release();
+                        mPlayer = null;
+                    }
+                    mAudioListContainer.removeView(audioItem);
+                    if (mAudioListContainer.getChildCount() == 0) {
+                        mAudioListContainer.setVisibility(View.GONE);
+                    }
+                    mWorkingNote.discardAudioData(audioPath);
+                }
+            });
+
+        } catch (Exception e) {
+        // [Log] 5. 捕获可能的异常
+        android.util.Log.e(TAG, "addAudioViewRow: 创建 UI 时发生错误", e);
+    }
+    }
+    private void playAudio(String path, final android.widget.Button btnPlay) {
+        // 1. 检查当前是否有正在播放的音频
+        if (mPlayer != null) {
+            // 情况 A：点击的是当前正在播放的按钮 -> 执行“暂停/停止”逻辑
+            if (mCurrentPlayBtn == btnPlay) {
+                mPlayer.stop();
+                mPlayer.release();
+                mPlayer = null;
+
+                // 恢复图标为“播放”
+                btnPlay.setText("▶");
+                mCurrentPlayBtn = null;
+                return; // *** 关键：直接返回，不再执行后面的开始播放逻辑 ***
+            }
+
+            // 情况 B：点击的是另一个音频的按钮 -> 先停止旧的，再播新的
+            else {
+                mPlayer.stop();
+                mPlayer.release();
+                mPlayer = null;
+
+                // 把上一个按钮的图标复原
+                if (mCurrentPlayBtn != null) {
+                    mCurrentPlayBtn.setText("▶");
+                }
+            }
+        }
+
+        // 2. 开始播放新的音频
+        mPlayer = new MediaPlayer();
+        try {
+            mPlayer.setDataSource(path);
+            mPlayer.prepare();
+            mPlayer.start();
+
+            // 更新当前按钮状态为“暂停”
+            btnPlay.setText("⏸");
+            // 记录当前正在播放的按钮
+            mCurrentPlayBtn = btnPlay;
+
+            // 3. 监听播放结束
+            mPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override
+                public void onCompletion(MediaPlayer mp) {
+                    mPlayer.release();
+                    mPlayer = null;
+
+                    // 恢复图标
+                    btnPlay.setText("▶");
+                    mCurrentPlayBtn = null;
+                }
+            });
+
+        } catch (IOException e) {
+            android.util.Log.e(TAG, "Play audio failed", e);
+        }
+    }
+    // 重写 Activity 的 onRequestPermissionsResult 方法
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_CODE_RECORD_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                // 用户点击了“允许”，开始录音
+                startRecording();
+            } else {
+                // 用户点击了“拒绝”，提示用户
+                Toast.makeText(this, "需要录音权限才能使用语音便签", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        this.setContentView(R.layout.note_edit);
+
+        if (savedInstanceState == null && !initActivityState(getIntent())) {
+            finish();
+            return;
+        }
+        initResources();
+    }
+
+    /**
+     * Current activity may be killed when the memory is low. Once it is killed, for another time
+     * user load this activity, we should restore the former state
+     */
+    @Override
+    protected void onRestoreInstanceState(Bundle savedInstanceState) {
+        super.onRestoreInstanceState(savedInstanceState);
+        if (savedInstanceState != null && savedInstanceState.containsKey(Intent.EXTRA_UID)) {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.putExtra(Intent.EXTRA_UID, savedInstanceState.getLong(Intent.EXTRA_UID));
+            if (!initActivityState(intent)) {
+                finish();
+                return;
+            }
+            Log.d(TAG, "Restoring from killed activity");
+        }
+    }
+
+    private boolean initActivityState(Intent intent) {
+        /**
+         * If the user specified the {@link Intent#ACTION_VIEW} but not provided with id,
+         * then jump to the NotesListActivity
+         */
+        mWorkingNote = null;
+        if (TextUtils.equals(Intent.ACTION_VIEW, intent.getAction())) {
+            long noteId = intent.getLongExtra(Intent.EXTRA_UID, 0);
+            mUserQuery = "";
+
+            /**
+             * Starting from the searched result
+             */
+            if (intent.hasExtra(SearchManager.EXTRA_DATA_KEY)) {
+                noteId = Long.parseLong(intent.getStringExtra(SearchManager.EXTRA_DATA_KEY));
+                mUserQuery = intent.getStringExtra(SearchManager.USER_QUERY);
+            }
+
+            if (!DataUtils.visibleInNoteDatabase(getContentResolver(), noteId, Notes.TYPE_NOTE)) {
+                Intent jump = new Intent(this, NotesListActivity.class);
+                startActivity(jump);
+                showToast(R.string.error_note_not_exist);
+                finish();
+                return false;
+            } else {
+                mWorkingNote = WorkingNote.load(this, noteId);
+                if (mWorkingNote == null) {
+                    Log.e(TAG, "load note failed with note id" + noteId);
+                    finish();
+                    return false;
+                }
+            }
+            getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
+                            | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        } else if(TextUtils.equals(Intent.ACTION_INSERT_OR_EDIT, intent.getAction())) {
+            // New note
+            long folderId = intent.getLongExtra(Notes.INTENT_EXTRA_FOLDER_ID, 0);
+            int widgetId = intent.getIntExtra(Notes.INTENT_EXTRA_WIDGET_ID,
+                    AppWidgetManager.INVALID_APPWIDGET_ID);
+            int widgetType = intent.getIntExtra(Notes.INTENT_EXTRA_WIDGET_TYPE,
+                    Notes.TYPE_WIDGET_INVALIDE);
+            int bgResId = intent.getIntExtra(Notes.INTENT_EXTRA_BACKGROUND_ID,
+                    ResourceParser.getDefaultBgId(this));
+
+            // Parse call-record note
+            String phoneNumber = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER);
+            long callDate = intent.getLongExtra(Notes.INTENT_EXTRA_CALL_DATE, 0);
+            if (callDate != 0 && phoneNumber != null) {
+                if (TextUtils.isEmpty(phoneNumber)) {
+                    Log.w(TAG, "The call record number is null");
+                }
+                long noteId = 0;
+                if ((noteId = DataUtils.getNoteIdByPhoneNumberAndCallDate(getContentResolver(),
+                        phoneNumber, callDate)) > 0) {
+                    mWorkingNote = WorkingNote.load(this, noteId);
+                    if (mWorkingNote == null) {
+                        Log.e(TAG, "load call note failed with note id" + noteId);
+                        finish();
+                        return false;
+                    }
+                } else {
+                    mWorkingNote = WorkingNote.createEmptyNote(this, folderId, widgetId,
+                            widgetType, bgResId);
+                    mWorkingNote.convertToCallNote(phoneNumber, callDate);
+                }
+            } else {
+                mWorkingNote = WorkingNote.createEmptyNote(this, folderId, widgetId, widgetType,
+                        bgResId);
+            }
+
+            getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                            | WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        } else {
+            Log.e(TAG, "Intent not specified action, should not support");
+            finish();
+            return false;
+        }
+        mWorkingNote.setOnSettingStatusChangedListener(this);
+        return true;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        initNoteScreen();
+    }
+
+    private void initNoteScreen() {
+        mNoteEditor.setTextAppearance(this, TextAppearanceResources
+                .getTexAppearanceResource(mFontSizeId));
+        // [新增] 初始化阅读模式状态
+        // 只有当便签已存在（不是新建）时才读取状态
+        if (mWorkingNote.getNoteId() > 0) {
+            boolean savedMode = mSharedPrefs.getBoolean(PREF_READ_MODE_PREFIX + mWorkingNote.getNoteId(), false);
+            setReadMode(savedMode);
+        }
+        if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
+            switchToListMode(mWorkingNote.getContent());
+        } else {
+            mNoteEditor.setText(getHighlightQueryResult(mWorkingNote.getContent(), mUserQuery));
+            mNoteEditor.setSelection(mNoteEditor.getText().length());
+        }
+        for (Integer id : sBgSelectorSelectionMap.keySet()) {
+            findViewById(sBgSelectorSelectionMap.get(id)).setVisibility(View.GONE);
+        }
+        mHeadViewPanel.setBackgroundResource(mWorkingNote.getTitleBgResId());
+        mNoteEditorPanel.setBackgroundResource(mWorkingNote.getBgColorResId());
+
+        mNoteHeaderHolder.tvModified.setText(DateUtils.formatDateTime(this,
+                mWorkingNote.getModifiedDate(), DateUtils.FORMAT_SHOW_DATE
+                        | DateUtils.FORMAT_NUMERIC_DATE | DateUtils.FORMAT_SHOW_TIME
+                        | DateUtils.FORMAT_SHOW_YEAR));
+
+        showAlertHeader();
+        refreshAudioList();
+        updateCharCount();
+    }
+
+    private void showAlertHeader() {
+        if (mWorkingNote.hasClockAlert()) {
+            long time = System.currentTimeMillis();
+            if (time > mWorkingNote.getAlertDate()) {
+                mNoteHeaderHolder.tvAlertDate.setText(R.string.note_alert_expired);
+            } else {
+                mNoteHeaderHolder.tvAlertDate.setText(DateUtils.getRelativeTimeSpanString(
+                        mWorkingNote.getAlertDate(), time, DateUtils.MINUTE_IN_MILLIS));
+            }
+            mNoteHeaderHolder.tvAlertDate.setVisibility(View.VISIBLE);
+            mNoteHeaderHolder.ivAlertIcon.setVisibility(View.VISIBLE);
+        } else {
+            mNoteHeaderHolder.tvAlertDate.setVisibility(View.GONE);
+            mNoteHeaderHolder.ivAlertIcon.setVisibility(View.GONE);
+        };
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        initActivityState(intent);
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (!mWorkingNote.existInDatabase()) {
+            saveNote();
+        }
+        outState.putLong(Intent.EXTRA_UID, mWorkingNote.getNoteId());
+        Log.d(TAG, "Save working note id: " + mWorkingNote.getNoteId() + " onSaveInstanceState");
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (mNoteBgColorSelector.getVisibility() == View.VISIBLE
+                && !inRangeOfView(mNoteBgColorSelector, ev)) {
+            mNoteBgColorSelector.setVisibility(View.GONE);
+            return true;
+        }
+
+        if (mFontSizeSelector.getVisibility() == View.VISIBLE
+                && !inRangeOfView(mFontSizeSelector, ev)) {
+            mFontSizeSelector.setVisibility(View.GONE);
+            return true;
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    private boolean inRangeOfView(View view, MotionEvent ev) {
+        int []location = new int[2];
+        view.getLocationOnScreen(location);
+        int x = location[0];
+        int y = location[1];
+        if (ev.getX() < x
+                || ev.getX() > (x + view.getWidth())
+                || ev.getY() < y
+                || ev.getY() > (y + view.getHeight())) {
+                    return false;
+                }
+        return true;
+    }
+
+    private void initResources() {
+        mHeadViewPanel = findViewById(R.id.note_title);
+        mNoteHeaderHolder = new HeadViewHolder();
+        mNoteHeaderHolder.tvModified = (TextView) findViewById(R.id.tv_modified_date);
+        mNoteHeaderHolder.tvCharCount = (TextView) findViewById(R.id.tv_char_count);
+        mNoteHeaderHolder.ivAlertIcon = (ImageView) findViewById(R.id.iv_alert_icon);
+        mNoteHeaderHolder.tvAlertDate = (TextView) findViewById(R.id.tv_alert_date);
+        mNoteHeaderHolder.ibSetBgColor = (ImageView) findViewById(R.id.btn_set_bg_color);
+        mNoteHeaderHolder.ibSetBgColor.setOnClickListener(this);
+        mNoteEditor = (EditText) findViewById(R.id.note_edit_view);
+        // [新增] 点击事件拦截：如果处于阅读模式，拦截点击，防止弹出键盘
+        mNoteEditor.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mIsReadMode) {
+                    // 阅读模式下被点击，可以提示用户如何解锁
+                    // showToast(R.string.info_read_only_mode);
+                }
+            }
+        });
+        mNoteEditorPanel = findViewById(R.id.sv_note_edit);
+        mNoteBgColorSelector = findViewById(R.id.note_bg_color_selector);
+
+        // [新增] 绑定麦克风按钮
+        mBtnMic = (ImageView) findViewById(R.id.btn_mic);
+        mBtnMic.setOnClickListener(this);
+
+        // [新增] 绑定音频容器
+        mAudioListContainer = (LinearLayout) findViewById(R.id.note_audio_list);
+        // 如果 WorkingNote 中已有音频数据，需在此处加载并显示 (refreshAudioList)
+        for (int id : sBgSelectorBtnsMap.keySet()) {
+            ImageView iv = (ImageView) findViewById(id);
+            iv.setOnClickListener(this);
+        }
+
+        mFontSizeSelector = findViewById(R.id.font_size_selector);
+        for (int id : sFontSizeBtnsMap.keySet()) {
+            View view = findViewById(id);
+            view.setOnClickListener(this);
+        };
+        mSharedPrefs = PreferenceManager.getDefaultSharedPreferences(this);
+        mFontSizeId = mSharedPrefs.getInt(PREFERENCE_FONT_SIZE, ResourceParser.BG_DEFAULT_FONT_SIZE);
+        if(mFontSizeId >= TextAppearanceResources.getResourcesSize()) {
+            mFontSizeId = ResourceParser.BG_DEFAULT_FONT_SIZE;
+        }
+        mEditTextList = (LinearLayout) findViewById(R.id.note_edit_list);
+
+        mNoteEditor.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                // Do nothing
+            }
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                updateCharCount();
+            }
+            public void afterTextChanged(Editable s) {
+                // Do nothing
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if(saveNote()) {
+            Log.d(TAG, "Note data was saved with length:" + mWorkingNote.getContent().length());
+        }
+        // 停止录音
+        if (mIsRecording) {
+            stopRecording();
+        }
+        // 停止播放
+        if (mPlayer != null) {
+            mPlayer.release();
+            mPlayer = null;
+        }
+        clearSettingState();
+    }
+
+    private void updateWidget() {
+        Intent intent = new Intent(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
+        if (mWorkingNote.getWidgetType() == Notes.TYPE_WIDGET_2X) {
+            intent.setClass(this, NoteWidgetProvider_2x.class);
+        } else if (mWorkingNote.getWidgetType() == Notes.TYPE_WIDGET_4X) {
+            intent.setClass(this, NoteWidgetProvider_4x.class);
+        } else {
+            Log.e(TAG, "Unsupported widget type");
+            return;
+        }
+
+        intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, new int[] {
+            mWorkingNote.getWidgetId()
+        });
+
+        sendBroadcast(intent);
+        setResult(RESULT_OK, intent);
+    }
+    // [新增] 执行星火 AI 总结入口
+    // [修改后] 执行星火 AI 总结入口
+    private void performSparkLiteSummary() {
+        // 1. 先调用此方法同步 View 中的内容到 mWorkingNote 对象中
+        // 注意：这里不需要接收返回值，因为我们只需要它执行同步逻辑
+        getWorkingText();
+
+        // 2. 从 mWorkingNote 对象中获取真正的文本内容
+        String content = mWorkingNote.getContent();
+
+        // 3. 简单过滤掉 CheckList 的标记符号，避免干扰 AI
+        content = content.replace(TAG_CHECKED, "").replace(TAG_UNCHECKED, "");
+
+        if (TextUtils.isEmpty(content.trim())) {
+            showToast(R.string.ai_summary_empty);
+            return;
+        }
+
+        mAiResponseBuilder = new StringBuilder();
+
+        // 显示加载框
+        mAiProgressDialog = new android.app.ProgressDialog(this);
+        mAiProgressDialog.setTitle(getString(R.string.ai_summary_dialog_title));
+        mAiProgressDialog.setMessage(getString(R.string.ai_summary_loading));
+        mAiProgressDialog.setCancelable(true);
+        mAiProgressDialog.show();
+
+        final String finalContent = content;
+        // 在子线程启动 WebSocket
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                startSparkWebSocket(finalContent);
+            }
+        }).start();
+    }
+
+    // [新增] 启动 WebSocket 连接
+    private void startSparkWebSocket(final String userContent) {
+        try {
+            // 1. 生成鉴权 URL
+            String authUrl = getAuthUrl(SPARK_HOST_URL, SPARK_API_KEY, SPARK_API_SECRET);
+            // 将 https 替换为 wss
+            String wsUrl = authUrl.replace("http://", "ws://").replace("https://", "wss://");
+
+            OkHttpClient client = new OkHttpClient.Builder().build();
+            Request request = new Request.Builder().url(wsUrl).build();
+
+            // 2. 建立连接
+            client.newWebSocket(request, new WebSocketListener() {
+                @Override
+                public void onOpen(WebSocket webSocket, Response response) {
+                    super.onOpen(webSocket, response);
+                    // 连接成功，发送数据
+                    sendUserMessage(webSocket, userContent);
+                }
+
+                @Override
+                public void onMessage(WebSocket webSocket, String text) {
+                    super.onMessage(webSocket, text);
+                    // 收到消息，解析
+                    parseSparkResponse(text);
+                }
+
+                @Override
+                public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                    super.onFailure(webSocket, t, response);
+                    handleAiError(t);
+                }
+            });
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 构造并发送用户消息 JSON
+    private void sendUserMessage(WebSocket webSocket, String content) {
+        try {
+            JSONObject requestJson = new JSONObject();
+
+            // Header
+            JSONObject header = new JSONObject();
+            header.put("app_id", SPARK_APP_ID);
+            header.put("uid", java.util.UUID.randomUUID().toString().substring(0, 10));
+            requestJson.put("header", header);
+
+            // Parameter
+            JSONObject parameter = new JSONObject();
+            JSONObject chat = new JSONObject();
+            chat.put("domain", SPARK_DOMAIN);
+            chat.put("temperature", 0.5);
+            chat.put("max_tokens", 2048);
+            parameter.put("chat", chat);
+            requestJson.put("parameter", parameter);
+
+            // Payload
+            JSONObject payload = new JSONObject();
+            JSONObject message = new JSONObject();
+            JSONArray textArray = new JSONArray();
+            JSONObject textObj = new JSONObject();
+            textObj.put("role", "user");
+            // 提示词：强制要求总结
+            textObj.put("content", "请简要总结以下便签内容的核心要点：\n\n" + content);
+            textArray.put(textObj);
+            message.put("text", textArray);
+            payload.put("message", message);
+            requestJson.put("payload", payload);
+
+            webSocket.send(requestJson.toString());
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 解析星火返回的 JSON
+    private void parseSparkResponse(String jsonText) {
+        try {
+            JSONObject jsonObject = new JSONObject(jsonText);
+            JSONObject header = jsonObject.optJSONObject("header");
+            int code = header.optInt("code");
+
+            if (code != 0) {
+                Log.e(TAG, "Spark Error: " + jsonText);
+                handleAiError(new Exception("Error Code: " + code));
+                return;
+            }
+
+            JSONObject payload = jsonObject.optJSONObject("payload");
+            JSONObject choices = payload.optJSONObject("choices");
+            int status = header.optInt("status"); // 0:首包, 1:中间, 2:尾包
+            JSONArray textArray = choices.optJSONArray("text");
+
+            if (textArray != null && textArray.length() > 0) {
+                JSONObject contentObj = textArray.getJSONObject(0);
+                String content = contentObj.optString("content");
+                mAiResponseBuilder.append(content);
+            }
+
+            if (status == 2) {
+                // 传输结束，显示结果
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mAiProgressDialog != null) mAiProgressDialog.dismiss();
+                        showAiResultDialog(mAiResponseBuilder.toString());
+                    }
+                });
+            }
+
+        } catch (Exception e) {
+            handleAiError(e);
+        }
+    }
+
+    // [新增] 统一错误处理
+    private void handleAiError(Throwable t) {
+        t.printStackTrace();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mAiProgressDialog != null) mAiProgressDialog.dismiss();
+                showToast(R.string.ai_summary_error);
+            }
+        });
+    }
+
+    // [新增] 显示结果对话框
+    private void showAiResultDialog(final String result) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(R.string.ai_summary_dialog_title);
+        builder.setMessage(result);
+
+        // 复制按钮
+        builder.setNeutralButton(R.string.btn_copy, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                android.content.ClipData clip = android.content.ClipData.newPlainText("AI Summary", result);
+                cm.setPrimaryClip(clip);
+                showToast(R.string.ai_copy_success);
+            }
+        });
+
+        // 追加按钮
+        builder.setPositiveButton(R.string.btn_append, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                if (mNoteEditor != null) {
+                    mNoteEditor.append("\n\n【AI 总结】\n" + result);
+                    saveNote();
+                    // 如果有光标，移动到末尾
+                    mNoteEditor.setSelection(mNoteEditor.length());
+                }
+            }
+        });
+
+        builder.setNegativeButton(R.string.btn_close, null);
+        builder.show();
+    }
+
+    // [新增] 星火鉴权 URL 生成算法 (HMAC-SHA256)
+    public static String getAuthUrl(String hostUrl, String apiKey, String apiSecret) throws Exception {
+        URL url = new URL(hostUrl);
+        SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+        String date = sdf.format(new Date());
+
+        String host = url.getHost();
+        // 注意：v1/x1 这种带路径的 URL，Request-Line 必须包含路径
+        StringBuilder builder = new StringBuilder("host: ").append(host).append("\n").//
+                append("date: ").append(date).append("\n").//
+                append("GET ").append(url.getPath()).append(" HTTP/1.1");
+
+        Mac mac = Mac.getInstance("hmacsha256");
+        SecretKeySpec spec = new SecretKeySpec(apiSecret.getBytes(StandardCharsets.UTF_8), "hmacsha256");
+        mac.init(spec);
+        byte[] hexDigits = mac.doFinal(builder.toString().getBytes(StandardCharsets.UTF_8));
+
+        // 使用 Android Base64 NoWrap 模式
+        String sha = Base64.encodeToString(hexDigits, Base64.NO_WRAP);
+
+        String authorization = String.format("api_key=\"%s\", algorithm=\"%s\", headers=\"%s\", signature=\"%s\"", apiKey, "hmac-sha256", "host date request-line", sha);
+
+        String authBase64 = Base64.encodeToString(authorization.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+
+        return String.format("%s?authorization=%s&date=%s&host=%s", hostUrl,
+                java.net.URLEncoder.encode(authBase64, "UTF-8"),
+                java.net.URLEncoder.encode(date, "UTF-8"), host);
+    }
+
+    public void onClick(View v) {
+        int id = v.getId();
+        if (id == R.id.btn_mic) {
+            if (!mIsRecording) {
+                // [完整逻辑] 检查权限
+                if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    // 如果没有权限，向用户申请
+                    requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO},
+                            REQUEST_CODE_RECORD_AUDIO);
+                } else {
+                    // 如果已有权限，直接开始
+                    startRecording();
+                }
+            } else {
+                stopRecording();
+            }
+        }
+        if (id == R.id.btn_set_bg_color) {
+            mNoteBgColorSelector.setVisibility(View.VISIBLE);
+            findViewById(sBgSelectorSelectionMap.get(mWorkingNote.getBgColorId())).setVisibility(
+                    View.VISIBLE);
+        } else if (sBgSelectorBtnsMap.containsKey(id)) {
+            findViewById(sBgSelectorSelectionMap.get(mWorkingNote.getBgColorId())).setVisibility(
+                    View.GONE);
+            mWorkingNote.setBgColorId(sBgSelectorBtnsMap.get(id));
+            mNoteBgColorSelector.setVisibility(View.GONE);
+        } else if (sFontSizeBtnsMap.containsKey(id)) {
+            findViewById(sFontSelectorSelectionMap.get(mFontSizeId)).setVisibility(View.GONE);
+            mFontSizeId = sFontSizeBtnsMap.get(id);
+            mSharedPrefs.edit().putInt(PREFERENCE_FONT_SIZE, mFontSizeId).commit();
+            findViewById(sFontSelectorSelectionMap.get(mFontSizeId)).setVisibility(View.VISIBLE);
+            if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
+                getWorkingText();
+                switchToListMode(mWorkingNote.getContent());
+            } else {
+                mNoteEditor.setTextAppearance(this,
+                        TextAppearanceResources.getTexAppearanceResource(mFontSizeId));
+            }
+            mFontSizeSelector.setVisibility(View.GONE);
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if(clearSettingState()) {
+            return;
+        }
+
+        saveNote();
+        super.onBackPressed();
+    }
+
+    private boolean clearSettingState() {
+        if (mNoteBgColorSelector.getVisibility() == View.VISIBLE) {
+            mNoteBgColorSelector.setVisibility(View.GONE);
+            return true;
+        } else if (mFontSizeSelector.getVisibility() == View.VISIBLE) {
+            mFontSizeSelector.setVisibility(View.GONE);
+            return true;
+        }
+        return false;
+    }
+
+    public void onBackgroundColorChanged() {
+        findViewById(sBgSelectorSelectionMap.get(mWorkingNote.getBgColorId())).setVisibility(
+                View.VISIBLE);
+        mNoteEditorPanel.setBackgroundResource(mWorkingNote.getBgColorResId());
+        mHeadViewPanel.setBackgroundResource(mWorkingNote.getTitleBgResId());
+    }
+
+    @Override
+    public boolean onPrepareOptionsMenu(Menu menu) {
+        if (isFinishing()) {
+            return true;
+        }
+        clearSettingState();
+        menu.clear();
+        if (mWorkingNote.getFolderId() == Notes.ID_CALL_RECORD_FOLDER) {
+            getMenuInflater().inflate(R.menu.call_note_edit, menu);
+        } else {
+            getMenuInflater().inflate(R.menu.note_edit, menu);
+        }
+
+        // [关键修复部分] 设置菜单标题
+        MenuItem modeItem = menu.findItem(R.id.menu_toggle_read_mode);
+        if (modeItem != null) {
+            if (mIsReadMode) {
+                // 情况 A：当前【是】阅读模式 -> 按钮功能应该是【退出阅读/进入编辑】
+                modeItem.setTitle(R.string.menu_mode_edit);
+                modeItem.setIcon(android.R.drawable.ic_menu_edit);
+            } else {
+                // 情况 B：当前【是】编辑模式 -> 按钮功能应该是【进入阅读】
+                modeItem.setTitle(R.string.menu_mode_view);
+                modeItem.setIcon(android.R.drawable.ic_menu_view);
+            }
+        }
+
+        if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
+            menu.findItem(R.id.menu_list_mode).setTitle(R.string.menu_normal_mode);
+        } else {
+            menu.findItem(R.id.menu_list_mode).setTitle(R.string.menu_list_mode);
+        }
+        if (mWorkingNote.hasClockAlert()) {
+            menu.findItem(R.id.menu_alert).setVisible(false);
+        } else {
+            menu.findItem(R.id.menu_delete_remind).setVisible(false);
+        }
+        // 处理置顶菜单显示
+        if (mWorkingNote.existInDatabase()) {
+            boolean isPinned = isNotePinned(mWorkingNote.getNoteId());
+            menu.findItem(R.id.menu_pin).setVisible(!isPinned);
+            menu.findItem(R.id.menu_unpin).setVisible(isPinned);
+        } else {
+            menu.findItem(R.id.menu_pin).setVisible(false);
+            menu.findItem(R.id.menu_unpin).setVisible(false);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        switch (item.getItemId()) {
+            case R.id.menu_new_note:
+                createNewNote();
+                break;
+            // [新增] 处理 AI 总结菜单点击
+            case R.id.menu_ai_summary:
+                performSparkLiteSummary();
+                break;
+            // [新增] 处理阅读/编辑模式切换
+            case R.id.menu_toggle_read_mode:
+                setReadMode(!mIsReadMode); // 切换状态
+                if (mIsReadMode) {
+                    showToast(R.string.info_read_only_mode);
+                }
+                break;
+            case R.id.menu_delete:
+                AlertDialog.Builder builder = new AlertDialog.Builder(this);
+                builder.setTitle(getString(R.string.alert_title_delete));
+                builder.setIcon(android.R.drawable.ic_dialog_alert);
+                builder.setMessage(getString(R.string.alert_message_delete_note));
+                builder.setPositiveButton(android.R.string.ok,
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface dialog, int which) {
+                                deleteCurrentNote();
+                                finish();
+                            }
+                        });
+                builder.setNegativeButton(android.R.string.cancel, null);
+                builder.show();
+                break;
+            case R.id.menu_font_size:
+                mFontSizeSelector.setVisibility(View.VISIBLE);
+                findViewById(sFontSelectorSelectionMap.get(mFontSizeId)).setVisibility(View.VISIBLE);
+                break;
+            case R.id.menu_list_mode:
+                mWorkingNote.setCheckListMode(mWorkingNote.getCheckListMode() == 0 ?
+                        TextNote.MODE_CHECK_LIST : 0);
+                break;
+            case R.id.menu_share:
+                getWorkingText();
+                sendTo(this, mWorkingNote.getContent());
+                break;
+            case R.id.menu_send_to_desktop:
+                sendToDesktop();
+                break;
+            case R.id.menu_alert:
+                setReminder();
+                break;
+            case R.id.menu_delete_remind:
+                mWorkingNote.setAlertDate(0, false);
+                break;
+            case R.id.menu_pin:
+                pinNote(true);
+                invalidateOptionsMenu();
+                break;
+            case R.id.menu_unpin:
+                pinNote(false);
+                invalidateOptionsMenu();
+                break;
+            default:
+                break;
+        }
+        return true;
+    }
+
+    private void setReminder() {
+        DateTimePickerDialog d = new DateTimePickerDialog(this, System.currentTimeMillis());
+        d.setOnDateTimeSetListener(new OnDateTimeSetListener() {
+            public void OnDateTimeSet(AlertDialog dialog, long date) {
+                mWorkingNote.setAlertDate(date, true);
+            }
+        });
+        d.show();
+    }
+
+    private void sendTo(Context context, String info) {
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.putExtra(Intent.EXTRA_TEXT, info);
+        intent.setType("text/plain");
+        context.startActivity(intent);
+    }
+
+    private void createNewNote() {
+        saveNote();
+        finish();
+        Intent intent = new Intent(this, NoteEditActivity.class);
+        intent.setAction(Intent.ACTION_INSERT_OR_EDIT);
+        intent.putExtra(Notes.INTENT_EXTRA_FOLDER_ID, mWorkingNote.getFolderId());
+        startActivity(intent);
+    }
+
+    private void deleteCurrentNote() {
+        if (mWorkingNote.existInDatabase()) {
+            HashSet<Long> ids = new HashSet<Long>();
+            long id = mWorkingNote.getNoteId();
+            if (id != Notes.ID_ROOT_FOLDER) {
+                ids.add(id);
+            } else {
+                Log.d(TAG, "Wrong note id, should not happen");
+            }
+            if (!isSyncMode()) {
+                if (!DataUtils.batchDeleteNotes(getContentResolver(), ids)) {
+                    Log.e(TAG, "Delete Note error");
+                }
+            } else {
+                if (!DataUtils.batchMoveToFolder(getContentResolver(), ids, Notes.ID_TRASH_FOLER)) {
+                    Log.e(TAG, "Move notes to trash folder error, should not happens");
+                }
+            }
+        }
+        mWorkingNote.markDeleted(true);
+    }
+
+    private boolean isSyncMode() {
+        return NotesPreferenceActivity.getSyncAccountName(this).trim().length() > 0;
+    }
+
+    public void onClockAlertChanged(long date, boolean set) {
+        if (!mWorkingNote.existInDatabase()) {
+            saveNote();
+        }
+        if (mWorkingNote.getNoteId() > 0) {
+            Intent intent = new Intent(this, AlarmReceiver.class);
+            intent.setData(ContentUris.withAppendedId(Notes.CONTENT_NOTE_URI, mWorkingNote.getNoteId()));
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(this, 0, intent, 0);
+            AlarmManager alarmManager = ((AlarmManager) getSystemService(ALARM_SERVICE));
+            showAlertHeader();
+            if(!set) {
+                alarmManager.cancel(pendingIntent);
+            } else {
+                alarmManager.set(AlarmManager.RTC_WAKEUP, date, pendingIntent);
+            }
+        } else {
+            Log.e(TAG, "Clock alert setting error");
+            showToast(R.string.error_note_empty_for_clock);
+        }
+    }
+
+    public void onWidgetChanged() {
+        updateWidget();
+    }
+
+    public void onEditTextDelete(int index, String text) {
+        int childCount = mEditTextList.getChildCount();
+        if (childCount == 1) {
+            return;
+        }
+
+        for (int i = index + 1; i < childCount; i++) {
+            ((NoteEditText) mEditTextList.getChildAt(i).findViewById(R.id.et_edit_text))
+                    .setIndex(i - 1);
+        }
+
+        mEditTextList.removeViewAt(index);
+        NoteEditText edit = null;
+        if(index == 0) {
+            edit = (NoteEditText) mEditTextList.getChildAt(0).findViewById(
+                    R.id.et_edit_text);
+        } else {
+            edit = (NoteEditText) mEditTextList.getChildAt(index - 1).findViewById(
+                    R.id.et_edit_text);
+        }
+        int length = edit.length();
+        edit.append(text);
+        edit.requestFocus();
+        edit.setSelection(length);
+        updateCharCount();
+    }
+
+    public void onEditTextEnter(int index, String text) {
+        if(index > mEditTextList.getChildCount()) {
+            Log.e(TAG, "Index out of mEditTextList boundary, should not happen");
+        }
+
+        View view = getListItem(text, index);
+        mEditTextList.addView(view, index);
+        NoteEditText edit = (NoteEditText) view.findViewById(R.id.et_edit_text);
+        edit.requestFocus();
+        edit.setSelection(0);
+        for (int i = index + 1; i < mEditTextList.getChildCount(); i++) {
+            ((NoteEditText) mEditTextList.getChildAt(i).findViewById(R.id.et_edit_text))
+                    .setIndex(i);
+        }
+        updateCharCount();
+    }
+
+    private void switchToListMode(String text) {
+        mEditTextList.removeAllViews();
+        String[] items = text.split("\n");
+        int index = 0;
+        for (String item : items) {
+            if(!TextUtils.isEmpty(item)) {
+                mEditTextList.addView(getListItem(item, index));
+                index++;
+            }
+        }
+        mEditTextList.addView(getListItem("", index));
+        mEditTextList.getChildAt(index).findViewById(R.id.et_edit_text).requestFocus();
+
+        mNoteEditor.setVisibility(View.GONE);
+        mEditTextList.setVisibility(View.VISIBLE);
+        updateCharCount();
+    }
+
+    private Spannable getHighlightQueryResult(String fullText, String userQuery) {
+        SpannableString spannable = new SpannableString(fullText == null ? "" : fullText);
+        if (!TextUtils.isEmpty(userQuery)) {
+            mPattern = Pattern.compile(userQuery);
+            Matcher m = mPattern.matcher(fullText);
+            int start = 0;
+            while (m.find(start)) {
+                spannable.setSpan(
+                        new BackgroundColorSpan(this.getResources().getColor(
+                                R.color.user_query_highlight)), m.start(), m.end(),
+                        Spannable.SPAN_INCLUSIVE_EXCLUSIVE);
+                start = m.end();
+            }
+        }
+        return spannable;
+    }
+
+    private View getListItem(String item, int index) {
+        View view = LayoutInflater.from(this).inflate(R.layout.note_edit_list_item, null);
+        final NoteEditText edit = (NoteEditText) view.findViewById(R.id.et_edit_text);
+        edit.setTextAppearance(this, TextAppearanceResources.getTexAppearanceResource(mFontSizeId));
+        CheckBox cb = ((CheckBox) view.findViewById(R.id.cb_edit_item));
+        cb.setOnCheckedChangeListener(new OnCheckedChangeListener() {
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (isChecked) {
+                    edit.setPaintFlags(edit.getPaintFlags() | Paint.STRIKE_THRU_TEXT_FLAG);
+                } else {
+                    edit.setPaintFlags(Paint.ANTI_ALIAS_FLAG | Paint.DEV_KERN_TEXT_FLAG);
+                }
+            }
+        });
+
+        if (item.startsWith(TAG_CHECKED)) {
+            cb.setChecked(true);
+            edit.setPaintFlags(edit.getPaintFlags() | Paint.STRIKE_THRU_TEXT_FLAG);
+            item = item.substring(TAG_CHECKED.length(), item.length()).trim();
+        } else if (item.startsWith(TAG_UNCHECKED)) {
+            cb.setChecked(false);
+            edit.setPaintFlags(Paint.ANTI_ALIAS_FLAG | Paint.DEV_KERN_TEXT_FLAG);
+            item = item.substring(TAG_UNCHECKED.length(), item.length()).trim();
+        }
+
+        edit.setOnTextViewChangeListener(this);
+        edit.setIndex(index);
+        edit.setText(getHighlightQueryResult(item, mUserQuery));
+        return view;
+    }
+
+    public void onTextChange(int index, boolean hasText) {
+        if (index >= mEditTextList.getChildCount()) {
+            Log.e(TAG, "Wrong index, should not happen");
+            return;
+        }
+        if(hasText) {
+            mEditTextList.getChildAt(index).findViewById(R.id.cb_edit_item).setVisibility(View.VISIBLE);
+        } else {
+            mEditTextList.getChildAt(index).findViewById(R.id.cb_edit_item).setVisibility(View.GONE);
+        }
+        updateCharCount();
+    }
+
+    public void onCheckListModeChanged(int oldMode, int newMode) {
+        if (newMode == TextNote.MODE_CHECK_LIST) {
+            switchToListMode(mNoteEditor.getText().toString());
+        } else {
+            String text = getWorkingText();
+            mNoteEditor.setText(getHighlightQueryResult(text, mUserQuery));
+            mEditTextList.setVisibility(View.GONE);
+            mNoteEditor.setVisibility(View.VISIBLE);
+        }
+        updateCharCount();
+    }
+
+    private String getWorkingText() {
+        if (mWorkingNote.getCheckListMode() == TextNote.MODE_CHECK_LIST) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < mEditTextList.getChildCount(); i++) {
+                View view = mEditTextList.getChildAt(i);
+                NoteEditText edit = (NoteEditText) view.findViewById(R.id.et_edit_text);
+                if (!TextUtils.isEmpty(edit.getText())) {
+                    if (((CheckBox) view.findViewById(R.id.cb_edit_item)).isChecked()) {
+                        sb.append(TAG_CHECKED).append(" ").append(edit.getText()).append("\n");
+                    } else {
+                        sb.append(TAG_UNCHECKED).append(" ").append(edit.getText()).append("\n");
+                    }
+                }
+            }
+            return sb.toString();
+        } else {
+            return mNoteEditor.getText().toString();
+        }
+    }
+
+    private boolean saveNote() {
+        String content = getWorkingText();
+        mWorkingNote.setWorkingText(content);
+        updateCharCount();
+        boolean saved = mWorkingNote.saveNote();
+        if (saved) {
+            setResult(RESULT_OK);
+        }
+        return saved;
+    }
+
+    private void sendToDesktop() {
+        if (!mWorkingNote.existInDatabase()) {
+            saveNote();
+        }
+
+        if (mWorkingNote.getNoteId() > 0) {
+            Intent sender = new Intent();
+            Intent shortcutIntent = new Intent(this, NoteEditActivity.class);
+            shortcutIntent.setAction(Intent.ACTION_VIEW);
+            shortcutIntent.putExtra(Intent.EXTRA_UID, mWorkingNote.getNoteId());
+            sender.putExtra(Intent.EXTRA_SHORTCUT_INTENT, shortcutIntent);
+            sender.putExtra(Intent.EXTRA_SHORTCUT_NAME,
+                    makeShortcutIconTitle(mWorkingNote.getContent()));
+            sender.putExtra(Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
+                    Intent.ShortcutIconResource.fromContext(this, R.drawable.icon_app));
+            sender.putExtra("duplicate", true);
+            sender.setAction("com.android.launcher.action.INSTALL_SHORTCUT");
+            showToast(R.string.info_note_enter_desktop);
+            sendBroadcast(sender);
+        } else {
+            Log.e(TAG, "Send to desktop error");
+            showToast(R.string.error_note_empty_for_send_to_desktop);
+        }
+    }
+
+    private String makeShortcutIconTitle(String content) {
+        content = content.replace(TAG_CHECKED, "");
+        content = content.replace(TAG_UNCHECKED, "");
+        return content.length() > SHORTCUT_ICON_TITLE_MAX_LEN ? content.substring(0,
+                SHORTCUT_ICON_TITLE_MAX_LEN) : content;
+    }
+
+    private void showToast(int resId) {
+        showToast(resId, Toast.LENGTH_SHORT);
+    }
+
+    private void showToast(int resId, int duration) {
+        Toast.makeText(this, resId, duration).show();
+    }
+
+    private void updateCharCount() {
+        String content = getWorkingText();
+        // In checklist mode, the tags are part of the text, so we should remove them for an accurate count.
+        content = content.replace(TAG_CHECKED + " ", "");
+        content = content.replace(TAG_UNCHECKED + " ", "");
+        int count = content.length();
+        mNoteHeaderHolder.tvCharCount.setText(getString(R.string.char_count, count));
+    }
+            
+    private boolean isNotePinned(long noteId) {
+        ContentResolver resolver = getContentResolver();
+        Cursor cursor = resolver.query(
+                ContentUris.withAppendedId(Notes.CONTENT_NOTE_URI, noteId),
+                new String[]{NoteColumns.IS_PINNED},
+                null, null, null);
+        boolean isPinned = false;
+        if (cursor != null) {
+            try {
+                if (cursor.moveToFirst()) {
+                    int columnIndex = cursor.getColumnIndex(NoteColumns.IS_PINNED);
+                    if (columnIndex >= 0) {
+                        isPinned = cursor.getInt(columnIndex) > 0;
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error checking pin status: " + e.getMessage());
+            } finally {
+                cursor.close();
+            }
+        }
+        return isPinned;
+    }
+
+    private void pinNote(boolean pin) {
+        if (!mWorkingNote.existInDatabase()) {
+            return;
+        }
+        ContentResolver resolver = getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(NoteColumns.IS_PINNED, pin ? 1 : 0);
+        values.put(NoteColumns.LOCAL_MODIFIED, 1);
+        resolver.update(
+                ContentUris.withAppendedId(Notes.CONTENT_NOTE_URI, mWorkingNote.getNoteId()),
+                values, null, null);
+    }
+}
