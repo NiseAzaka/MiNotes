@@ -447,16 +447,31 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
         final FoldersListAdapter adapter = new FoldersListAdapter(this, cursor);
         builder.setAdapter(adapter, new DialogInterface.OnClickListener() {
 
-            public void onClick(DialogInterface dialog, int which) {
-                DataUtils.batchMoveToFolder(mContentResolver,
-                        mNotesListAdapter.getSelectedItemIds(), adapter.getItemId(which));
-                Toast.makeText(
-                        NotesListActivity.this,
-                        getString(R.string.format_move_notes_to_folder,
-                                mNotesListAdapter.getSelectedCount(),
-                                adapter.getFolderName(NotesListActivity.this, which)),
-                        Toast.LENGTH_SHORT).show();
-                mModeCallBack.finishActionMode();
+            public void onClick(DialogInterface dialog, final int which) {
+                // 获取需要的数据，以便在后台线程使用
+                final long folderId = adapter.getItemId(which);
+                final HashSet<Long> selectedIds = mNotesListAdapter.getSelectedItemIds();
+                final String folderName = adapter.getFolderName(NotesListActivity.this, which);
+                final int selectedCount = mNotesListAdapter.getSelectedCount();
+
+                new AsyncTask<Void, Void, Void>() {
+                    @Override
+                    protected Void doInBackground(Void... params) {
+                        DataUtils.batchMoveToFolder(mContentResolver, selectedIds, folderId);
+                        return null;
+                    }
+
+                    @Override
+                    protected void onPostExecute(Void result) {
+                        Toast.makeText(
+                                NotesListActivity.this,
+                                getString(R.string.format_move_notes_to_folder,
+                                        selectedCount,
+                                        folderName),
+                                Toast.LENGTH_SHORT).show();
+                        mModeCallBack.finishActionMode();
+                    }
+                }.execute();
             }
         });
         builder.show();
@@ -506,31 +521,37 @@ public class NotesListActivity extends Activity implements OnClickListener, OnIt
         }.execute();
     }
 
-    private void deleteFolder(long folderId) {
+    private void deleteFolder(final long folderId) {
         if (folderId == Notes.ID_ROOT_FOLDER) {
             Log.e(TAG, "Wrong folder id, should not happen " + folderId);
             return;
         }
 
-        HashSet<Long> ids = new HashSet<Long>();
-        ids.add(folderId);
-        HashSet<AppWidgetAttribute> widgets = DataUtils.getFolderNoteWidget(mContentResolver,
-                folderId);
-        if (!isSyncMode()) {
-            // if not synced, delete folder directly
-            DataUtils.batchDeleteNotes(mContentResolver, ids);
-        } else {
-            // in sync mode, we'll move the deleted folder into the trash folder
-            DataUtils.batchMoveToFolder(mContentResolver, ids, Notes.ID_TRASH_FOLER);
-        }
-        if (widgets != null) {
-            for (AppWidgetAttribute widget : widgets) {
-                if (widget.widgetId != AppWidgetManager.INVALID_APPWIDGET_ID
-                        && widget.widgetType != Notes.TYPE_WIDGET_INVALIDE) {
-                    updateWidget(widget.widgetId, widget.widgetType);
+        new AsyncTask<Void, Void, Void>() {
+            @Override
+            protected Void doInBackground(Void... params) {
+                HashSet<Long> ids = new HashSet<Long>();
+                ids.add(folderId);
+                HashSet<AppWidgetAttribute> widgets = DataUtils.getFolderNoteWidget(mContentResolver,
+                        folderId);
+                if (!isSyncMode()) {
+                    // if not synced, delete folder directly
+                    DataUtils.batchDeleteNotes(mContentResolver, ids);
+                } else {
+                    // in sync mode, we'll move the deleted folder into the trash folder
+                    DataUtils.batchMoveToFolder(mContentResolver, ids, Notes.ID_TRASH_FOLER);
                 }
+                if (widgets != null) {
+                    for (AppWidgetAttribute widget : widgets) {
+                        if (widget.widgetId != AppWidgetManager.INVALID_APPWIDGET_ID
+                                && widget.widgetType != Notes.TYPE_WIDGET_INVALIDE) {
+                            updateWidget(widget.widgetId, widget.widgetType);
+                        }
+                    }
+                }
+                return null;
             }
-        }
+        }.execute();
     }
 
     private void openNode(NoteItemData data) {

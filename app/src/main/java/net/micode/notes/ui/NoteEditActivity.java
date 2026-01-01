@@ -250,7 +250,19 @@ public class NoteEditActivity extends Activity implements OnClickListener,
 
     // 用于记录当前正在播放的那个按钮，以便我们需要重置它的状态
     private android.widget.Button mCurrentPlayBtn;
-    // 在 NoteEditActivity 中添加此方法
+
+    // 用于更新播放进度的 Handler, Runnable 和当前显示时间的 View
+    private android.os.Handler mUiHandler = new android.os.Handler();
+    private Runnable mUpdateTimerRunnable;
+    private TextView mCurrentTimeView;
+
+    // 格式化时间为 mm:ss
+    private String formatTime(long millis) {
+        int totalSeconds = (int) (millis / 1000);
+        int seconds = totalSeconds % 60;
+        int minutes = totalSeconds / 60;
+        return String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds);
+    }
     private long getAudioDuration(String path) {
         android.media.MediaPlayer mp = new android.media.MediaPlayer();
         try {
@@ -264,7 +276,7 @@ public class NoteEditActivity extends Activity implements OnClickListener,
             mp.release();
         }
     }
-    // [新增] 停止录音
+    // 停止录音
     private void startRecording() {
         // 1. 准备文件路径 (建议存放在 getExternalFilesDir 或 getCacheDir)
         mCurrentAudioPath = getExternalFilesDir(null).getAbsolutePath() + "/" + System.currentTimeMillis() + ".amr";
@@ -376,97 +388,88 @@ public class NoteEditActivity extends Activity implements OnClickListener,
 
     // 这是一个纯 UI 添加方法，不涉及保存逻辑
     private void addAudioViewRow(final String audioPath) {
-        // [Log] 1. 开始构建 UI 条目
         android.util.Log.d(TAG, "addAudioViewRow: 开始构建 UI, 路径=" + audioPath);
 
         try {
-            // 1. 创建父布局
             final LinearLayout audioItem = new LinearLayout(this);
             audioItem.setOrientation(LinearLayout.HORIZONTAL);
-            // [调试色] 设置一个明显的背景色（浅灰色边框效果），确位置
             audioItem.setBackgroundColor(0xFFE0E0E0);
-            // 设置内边距
             audioItem.setPadding(30, 20, 30, 20);
-            // 设置外边距（让条目之间有间隔）
             LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT);
             itemParams.setMargins(0, 10, 0, 10);
             audioItem.setLayoutParams(itemParams);
 
-
-            // [Log] 2. 创建子 View
-            android.util.Log.d(TAG, "addAudioViewRow: 创建播放按钮和文本");
-
-
-            // 2. 创建播放按钮 (使用 Button 而不是 ImageView，防止图标看不见)
+            // 1. 播放按钮
             final android.widget.Button btnPlay = new android.widget.Button(this);
-            btnPlay.setText("▶"); // 使用文字符号代替图标
+            btnPlay.setText("▶");
             btnPlay.setTextSize(18);
             btnPlay.setTextColor(android.graphics.Color.BLACK);
-            // 移除默认按钮背景，设为透明或简单颜色
             btnPlay.setBackgroundColor(android.graphics.Color.TRANSPARENT);
             LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT);
             audioItem.addView(btnPlay, btnParams);
 
+            // [新增] 获取音频时长
+            final long duration = getAudioDuration(audioPath);
+            final String durationStr = formatTime(duration);
 
-
-            String fileName = null;
-
-
-
-            // 3. 创建文件名文本
+            // 2. 文件名文本
             TextView tvInfo = new TextView(this);
-            fileName = new java.io.File(audioPath).getName();
-            // [Log] 3. 打印文件名确认
-            android.util.Log.d(TAG, "addAudioViewRow: 显示文件名: " + fileName);
-            tvInfo.setText(" 语音: " + fileName);
+            String fileName = new java.io.File(audioPath).getName();
+            tvInfo.setText(" " + fileName); // 简化显示，去掉 "语音:" 前缀以节省空间
             tvInfo.setTextSize(16);
-            // [关键] 强制设为黑色，防止变白
             tvInfo.setTextColor(android.graphics.Color.BLACK);
             tvInfo.setGravity(android.view.Gravity.CENTER_VERTICAL);
 
-            // 让文本占据剩余空间
+            // 让文件名占据剩余空间 (weight=1)
             LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
                     0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
-            textParams.setMargins(20, 0, 0, 0); // 左边距
+            textParams.setMargins(10, 0, 0, 0);
             audioItem.addView(tvInfo, textParams);
 
-            // 4. 创建删除按钮 (使用 Button)
+            // [新增] 时间显示文本
+            final TextView tvTime = new TextView(this);
+            tvTime.setText("00:00 / " + durationStr);
+            tvTime.setTextSize(14);
+            tvTime.setTextColor(android.graphics.Color.GRAY);
+            tvTime.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            // 设置右边距，与删除按钮隔开
+            LinearLayout.LayoutParams timeParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            timeParams.setMargins(10, 0, 10, 0);
+            audioItem.addView(tvTime, timeParams);
+
+            // 3. 删除按钮
             android.widget.Button btnDelete = new android.widget.Button(this);
-            btnDelete.setText("✕"); // 叉号符号
+            btnDelete.setText("✕");
             btnDelete.setTextSize(18);
             btnDelete.setTextColor(android.graphics.Color.RED);
             btnDelete.setBackgroundColor(android.graphics.Color.TRANSPARENT);
             audioItem.addView(btnDelete);
 
-            // 5. 添加到容器
             mAudioListContainer.addView(audioItem);
             mAudioListContainer.setVisibility(View.VISIBLE);
-
-            // [Log] 4. 构建完成，打印容器当前子 View 数量
-            android.util.Log.d(TAG, "addAudioViewRow: UI 添加成功! 当前容器子 View 数量: " + mAudioListContainer.getChildCount());
-            android.util.Log.d(TAG, "addAudioViewRow: 容器可见性: " + (mAudioListContainer.getVisibility() == View.VISIBLE ? "VISIBLE" : "GONE/INVISIBLE"));
 
             // --- 点击事件 ---
             btnPlay.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    // 如果要切换图标，可以使用 btnPlay.setText("⏸")
-                    // [修复] 传入 btnPlay 对象，而不是 null
-                    playAudio(audioPath, btnPlay);
+                    // [修改] 传递 tvTime 和 duration 给 playAudio
+                    playAudio(audioPath, btnPlay, tvTime, duration);
                 }
             });
 
             btnDelete.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
+                    // 如果删除的是正在播放的音频，先停止
                     if (mPlayer != null && mPlayer.isPlaying()) {
-                        mPlayer.stop();
-                        mPlayer.release();
-                        mPlayer = null;
+                        // 简单的判断路径是否一致可能不够，这里直接停止比较安全
+                        stopCurrentPlayer();
                     }
                     mAudioListContainer.removeView(audioItem);
                     if (mAudioListContainer.getChildCount() == 0) {
@@ -477,35 +480,21 @@ public class NoteEditActivity extends Activity implements OnClickListener,
             });
 
         } catch (Exception e) {
-        // [Log] 5. 捕获可能的异常
-        android.util.Log.e(TAG, "addAudioViewRow: 创建 UI 时发生错误", e);
+            android.util.Log.e(TAG, "addAudioViewRow: 创建 UI 时发生错误", e);
+        }
     }
-    }
-    private void playAudio(String path, final android.widget.Button btnPlay) {
+    // 播放语音
+    // 增加 tvTime 和 totalDuration 参数
+    private void playAudio(String path, final android.widget.Button btnPlay, final TextView tvTime, final long totalDuration) {
         // 1. 检查当前是否有正在播放的音频
         if (mPlayer != null) {
-            // 情况 A：点击的是当前正在播放的按钮 -> 执行“暂停/停止”逻辑
             if (mCurrentPlayBtn == btnPlay) {
-                mPlayer.stop();
-                mPlayer.release();
-                mPlayer = null;
-
-                // 恢复图标为“播放”
-                btnPlay.setText("▶");
-                mCurrentPlayBtn = null;
-                return; // *** 关键：直接返回，不再执行后面的开始播放逻辑 ***
-            }
-
-            // 情况 B：点击的是另一个音频的按钮 -> 先停止旧的，再播新的
-            else {
-                mPlayer.stop();
-                mPlayer.release();
-                mPlayer = null;
-
-                // 把上一个按钮的图标复原
-                if (mCurrentPlayBtn != null) {
-                    mCurrentPlayBtn.setText("▶");
-                }
+                // 情况 A：点击的是当前正在播放的按钮 -> 停止播放
+                stopCurrentPlayer();
+                return;
+            } else {
+                // 情况 B：点击的是另一个音频的按钮 -> 停止旧的，播新的
+                stopCurrentPlayer();
             }
         }
 
@@ -516,26 +505,67 @@ public class NoteEditActivity extends Activity implements OnClickListener,
             mPlayer.prepare();
             mPlayer.start();
 
-            // 更新当前按钮状态为“暂停”
             btnPlay.setText("⏸");
-            // 记录当前正在播放的按钮
             mCurrentPlayBtn = btnPlay;
+            mCurrentTimeView = tvTime; // 记录当前的时间视图
+
+            // 启动计时器更新 UI
+            mUpdateTimerRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (mPlayer != null && mPlayer.isPlaying()) {
+                        long current = mPlayer.getCurrentPosition();
+                        tvTime.setText(formatTime(current) + " / " + formatTime(totalDuration));
+                        // 500ms 刷新一次
+                        mUiHandler.postDelayed(this, 500);
+                    }
+                }
+            };
+            mUiHandler.post(mUpdateTimerRunnable);
 
             // 3. 监听播放结束
             mPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
                 @Override
                 public void onCompletion(MediaPlayer mp) {
-                    mPlayer.release();
-                    mPlayer = null;
-
-                    // 恢复图标
-                    btnPlay.setText("▶");
-                    mCurrentPlayBtn = null;
+                    stopCurrentPlayer(); // 复用停止逻辑
                 }
             });
 
         } catch (IOException e) {
             android.util.Log.e(TAG, "Play audio failed", e);
+        }
+    }
+
+    // 封装停止播放的逻辑，复用代码
+    private void stopCurrentPlayer() {
+        if (mPlayer != null) {
+            mPlayer.stop();
+            mPlayer.release();
+            mPlayer = null;
+        }
+
+        // 停止计时器
+        if (mUiHandler != null && mUpdateTimerRunnable != null) {
+            mUiHandler.removeCallbacks(mUpdateTimerRunnable);
+        }
+
+        // 恢复按钮图标
+        if (mCurrentPlayBtn != null) {
+            mCurrentPlayBtn.setText("▶");
+            mCurrentPlayBtn = null;
+        }
+
+        // 恢复时间显示 (重置为 00:00 / 总时长)
+        if (mCurrentTimeView != null) {
+            String text = mCurrentTimeView.getText().toString();
+            // 简单的解析：取 "/" 后面的部分，重新拼装
+            if (text.contains("/")) {
+                String[] parts = text.split("/");
+                if (parts.length > 1) {
+                    mCurrentTimeView.setText("00:00 /" + parts[1]);
+                }
+            }
+            mCurrentTimeView = null;
         }
     }
     // 重写 Activity 的 onRequestPermissionsResult 方法
@@ -835,11 +865,8 @@ public class NoteEditActivity extends Activity implements OnClickListener,
         if (mIsRecording) {
             stopRecording();
         }
-        // 停止播放
-        if (mPlayer != null) {
-            mPlayer.release();
-            mPlayer = null;
-        }
+        stopCurrentPlayer();
+
         clearSettingState();
     }
 
